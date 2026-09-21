@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import CodeEditor from "../components/CodeEditor";
 import QuestionPanel from "../components/QuestionPanel";
 import TestResults from "../components/TestResults";
-import { levels, LEVEL_IDS, getQuestionsForLevel } from "../data/questions";
+import { LEVEL_IDS, levels as staticLevels } from "../data/questions";
 import { useExamFullscreen, useExamTimer } from "../hooks/useExam";
 import { runCodeAgainstTestCases } from "../services/codeExecutionService";
 import {
@@ -13,6 +13,8 @@ import {
   QuestionState,
   startExam,
   submitAnswer,
+  fetchExamQuestions,
+  endExam,
 } from "../services/examService";
 
 const LANGUAGES = [
@@ -29,32 +31,35 @@ export default function CodingPage() {
   const navigate = useNavigate();
 
   const [participant, setParticipant] = useState(null);
-  const [examMeta, setExamMeta] = useState(null); // { startedAt, endsAt, examId }
+  const [examMeta, setExamMeta] = useState(null);
   const [submissions, setSubmissions] = useState({});
   const [unlockedLevel, setUnlockedLevel] = useState(1);
   const [examComplete, setExamComplete] = useState(false);
+  const [endReason, setEndReason] = useState(null); // completed | timeout | ended
   const [bootError, setBootError] = useState(null);
+  const [levelsData, setLevelsData] = useState({ 1: [], 2: [], 3: [] });
 
   const [activeLevel, setActiveLevel] = useState(1);
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
 
-  // Per-question local editor state (no continuous backend writes)
   const [editorState, setEditorState] = useState({});
-  // Per-question run results
   const [runState, setRunState] = useState({});
 
   const [submitting, setSubmitting] = useState(false);
+  const [ending, setEnding] = useState(false);
 
   const { remainingMs, expired, formatTime } = useExamTimer(examMeta?.endsAt);
   const {
     containerRef,
     showWarning,
     enterFullscreen,
-  } = useExamFullscreen(Boolean(participant && examMeta && !expired && !examComplete));
+  } = useExamFullscreen(
+    Boolean(participant && examMeta && !expired && !examComplete)
+  );
 
   const questions = useMemo(
-    () => getQuestionsForLevel(activeLevel),
-    [activeLevel]
+    () => levelsData[activeLevel] || [],
+    [levelsData, activeLevel]
   );
   const currentQuestion = questions[activeQuestionIndex] ?? null;
   const currentQuestionId = currentQuestion?.id;
@@ -97,8 +102,30 @@ export default function CodingPage() {
         setSubmissions(state.submissions || {});
         setUnlockedLevel(state.unlockedLevel || 1);
         setExamComplete(Boolean(state.examComplete));
+        if (state.examComplete) setEndReason("completed");
+        if (state.timedOut) setEndReason("timeout");
         setActiveLevel(state.unlockedLevel || 1);
         setActiveQuestionIndex(0);
+
+        try {
+          const qData = await fetchExamQuestions();
+          if (!cancelled && qData?.levels) {
+            const next = {
+              1: qData.levels[1] || [],
+              2: qData.levels[2] || [],
+              3: qData.levels[3] || [],
+            };
+            if (next[1].length || next[2].length || next[3].length) {
+              setLevelsData(next);
+            } else {
+              setLevelsData(staticLevels);
+            }
+          } else if (!cancelled) {
+            setLevelsData(staticLevels);
+          }
+        } catch {
+          if (!cancelled) setLevelsData(staticLevels);
+        }
       } catch (err) {
         if (!cancelled) {
           setBootError(err.message || "Failed to start exam.");
@@ -257,12 +284,13 @@ export default function CodingPage() {
       if (result.unlockedLevel) {
         setUnlockedLevel(result.unlockedLevel);
       }
-      if (result.examComplete) {
-        setExamComplete(true);
-      }
+          if (result.examComplete) {
+            setExamComplete(true);
+            setEndReason("completed");
+          }
 
       // Auto-advance to next unsubmitted question in level, if any
-      const levelQuestions = getQuestionsForLevel(activeLevel);
+      const levelQuestions = levelsData[activeLevel] || [];
       const nextIndex = levelQuestions.findIndex(
         (q, i) =>
           i > activeQuestionIndex &&
@@ -288,6 +316,41 @@ export default function CodingPage() {
       setSubmitting(false);
     }
   };
+
+  const handleEndTest = async () => {
+    if (ending || examComplete) return;
+    const confirmed = window.confirm(
+      "End the exam now? You will not be able to continue after this."
+    );
+    if (!confirmed) return;
+
+    setEnding(true);
+    try {
+      const result = await endExam();
+      setExamComplete(true);
+      setEndReason("ended");
+      if (result?.submissions) setSubmissions(result.submissions);
+      if (result?.unlockedLevel) setUnlockedLevel(result.unlockedLevel);
+    } catch (err) {
+      alert(err.message || "Failed to end exam.");
+    } finally {
+      setEnding(false);
+    }
+  };
+
+  // Auto-end when client timer expires (server also enforces)
+  useEffect(() => {
+    if (!expired || examComplete || ending) return;
+    (async () => {
+      try {
+        await endExam();
+      } catch {
+        /* server may already have expired the exam */
+      }
+      setExamComplete(true);
+      setEndReason("timeout");
+    })();
+  }, [expired, examComplete, ending]);
 
   if (bootError) {
     return (
@@ -344,12 +407,14 @@ export default function CodingPage() {
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/85 px-5">
           <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#111] p-8 text-center shadow-2xl">
             <h2 className="text-2xl font-bold">
-              {examComplete ? "Exam Completed" : "Time's Up"}
+              {endReason === "timeout" || (expired && endReason !== "ended")
+                ? "Time's Up"
+                : "Exam Completed"}
             </h2>
             <p className="mt-3 text-sm leading-6 text-gray-400">
-              {examComplete
-                ? "You have submitted all questions. The exam is complete."
-                : "The 60-minute exam has ended. Submissions are no longer accepted."}
+              {endReason === "timeout" || (expired && endReason !== "ended")
+                ? "The 60-minute exam has ended. Submissions are no longer accepted."
+                : "Your exam has ended. Further submissions are not accepted."}
             </p>
             <p className="mt-4 text-xs text-gray-600">
               {participant.name} · {participant.registerNumber}
@@ -375,14 +440,26 @@ export default function CodingPage() {
             </p>
           </div>
 
-          <div
-            className={`rounded-lg border px-4 py-2 font-mono text-sm font-bold ${
-              remainingMs <= 5 * 60 * 1000
-                ? "border-red-500/30 bg-red-500/10 text-red-400"
-                : "border-white/10 bg-white/5 text-cyan-400"
-            }`}
-          >
-            {formatTime()}
+          <div className="flex items-center gap-3">
+            {!examEnded && (
+              <button
+                type="button"
+                onClick={handleEndTest}
+                disabled={ending}
+                className="rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-300 transition hover:bg-red-500/20 disabled:opacity-50"
+              >
+                {ending ? "Ending…" : "End Test"}
+              </button>
+            )}
+            <div
+              className={`rounded-lg border px-4 py-2 font-mono text-sm font-bold ${
+                remainingMs <= 5 * 60 * 1000
+                  ? "border-red-500/30 bg-red-500/10 text-red-400"
+                  : "border-white/10 bg-white/5 text-cyan-400"
+              }`}
+            >
+              {formatTime()}
+            </div>
           </div>
         </div>
       </header>
@@ -391,12 +468,14 @@ export default function CodingPage() {
       <div className="border-b border-white/10 bg-white/[0.02]">
         <div className="mx-auto flex max-w-[1600px] items-center px-5">
           {LEVEL_IDS.map((level) => {
-            const levelQuestions = levels[level];
-            const allSubmitted = levelQuestions.every(
-              (q) =>
-                getQuestionSubmissionState(submissions, q.id) ===
-                QuestionState.SUBMITTED
-            );
+            const levelQuestions = levelsData[level] || [];
+            const allSubmitted =
+              levelQuestions.length > 0 &&
+              levelQuestions.every(
+                (q) =>
+                  getQuestionSubmissionState(submissions, q.id) ===
+                  QuestionState.SUBMITTED
+              );
             const isLocked = level > unlockedLevel;
             const isCurrent = activeLevel === level && !allSubmitted;
             const isCompleted = allSubmitted;

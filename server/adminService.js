@@ -268,3 +268,132 @@ export function getEvaluationCriteria() {
     ],
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* Question + test case management (admin)                            */
+/* ------------------------------------------------------------------ */
+
+export async function listQuestions() {
+  const db = requireDb();
+  const { data: questions, error } = await db
+    .from("questions")
+    .select("*")
+    .order("level", { ascending: true })
+    .order("question_number", { ascending: true });
+  if (error) throw httpError(500, error.message);
+
+  const { data: cases, error: cErr } = await db
+    .from("test_cases")
+    .select("id, question_id, input, expected_output, is_hidden, sort_order")
+    .order("sort_order", { ascending: true });
+  if (cErr) throw httpError(500, cErr.message);
+
+  const byQ = {};
+  for (const tc of cases || []) {
+    if (!byQ[tc.question_id]) byQ[tc.question_id] = [];
+    byQ[tc.question_id].push(tc);
+  }
+
+  return (questions || []).map((q) => ({
+    ...q,
+    marks: Number(q.marks),
+    testCases: byQ[q.id] || [],
+  }));
+}
+
+export async function upsertQuestion(payload) {
+  const db = requireDb();
+  const id =
+    payload.id ||
+    `level${payload.level}-q${payload.question_number}-${Date.now()}`;
+
+  const row = {
+    id,
+    level: Number(payload.level),
+    question_number: Number(payload.question_number),
+    title: String(payload.title || "").trim(),
+    description: String(payload.description || "").trim(),
+    input_format: payload.input_format ?? payload.inputFormat ?? null,
+    output_format: payload.output_format ?? payload.outputFormat ?? null,
+    constraints: payload.constraints ?? null,
+    marks: Number(payload.marks) || 0,
+    examples: payload.examples ?? [],
+    starter_code: payload.starter_code ?? payload.starterCode ?? {},
+  };
+
+  if (![1, 2, 3].includes(row.level)) {
+    throw httpError(400, "Level must be 1, 2, or 3.");
+  }
+  if (!row.title || !row.description) {
+    throw httpError(400, "Title and description are required.");
+  }
+
+  const { data, error } = await db
+    .from("questions")
+    .upsert(row, { onConflict: "id" })
+    .select("*")
+    .single();
+
+  if (error) {
+    // Columns examples/starter_code require migration_admin_questions.sql
+    if (/examples|starter_code/i.test(error.message || "")) {
+      delete row.examples;
+      delete row.starter_code;
+      const retry = await db
+        .from("questions")
+        .upsert(row, { onConflict: "id" })
+        .select("*")
+        .single();
+      if (retry.error) throw httpError(500, retry.error.message);
+      return retry.data;
+    }
+    throw httpError(500, error.message);
+  }
+  return data;
+}
+
+export async function deleteQuestion(questionId) {
+  const db = requireDb();
+  const { error } = await db.from("questions").delete().eq("id", questionId);
+  if (error) throw httpError(500, error.message);
+  return { ok: true };
+}
+
+export async function upsertTestCase(payload) {
+  const db = requireDb();
+  const row = {
+    question_id: payload.question_id || payload.questionId,
+    input: payload.input ?? "",
+    expected_output: payload.expected_output ?? payload.expectedOutput ?? "",
+    is_hidden: Boolean(payload.is_hidden ?? payload.isHidden),
+    sort_order: Number(payload.sort_order ?? payload.sortOrder ?? 0),
+  };
+  if (!row.question_id) throw httpError(400, "question_id is required.");
+
+  if (payload.id) {
+    const { data, error } = await db
+      .from("test_cases")
+      .update(row)
+      .eq("id", payload.id)
+      .select("*")
+      .single();
+    if (error) throw httpError(500, error.message);
+    return data;
+  }
+
+  const { data, error } = await db
+    .from("test_cases")
+    .insert(row)
+    .select("*")
+    .single();
+  if (error) throw httpError(500, error.message);
+  return data;
+}
+
+export async function deleteTestCase(testCaseId) {
+  const db = requireDb();
+  const { error } = await db.from("test_cases").delete().eq("id", testCaseId);
+  if (error) throw httpError(500, error.message);
+  return { ok: true };
+}
+

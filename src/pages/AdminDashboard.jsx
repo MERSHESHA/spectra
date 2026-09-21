@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import AdminLeaderboard from "../components/AdminLeaderboard";
 import EvaluationCriteria from "../components/EvaluationCriteria";
+import AdminQuestions from "../components/AdminQuestions";
 import {
   clearAdminSession,
   fetchEvaluationCriteria,
@@ -15,6 +16,7 @@ import {
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "leaderboard", label: "Leaderboard" },
+  { id: "questions", label: "Questions" },
   { id: "criteria", label: "Evaluation Criteria" },
 ];
 
@@ -72,11 +74,11 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (!ready) return undefined;
+    if (tab === "questions") return undefined;
     refresh();
-    // Soft refresh every 60s — not continuous polling
     const id = setInterval(refresh, 60_000);
     return () => clearInterval(id);
-  }, [ready, refresh]);
+  }, [ready, refresh, tab]);
 
   const handleSelect = async (row) => {
     setSelectedId(row.studentId);
@@ -180,6 +182,8 @@ export default function AdminDashboard() {
             <StudentDetailPanel detail={detail} />
           </div>
         )}
+
+        {tab === "questions" && <AdminQuestions />}
 
         {tab === "criteria" && <EvaluationCriteria criteria={criteria} />}
       </div>

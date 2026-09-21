@@ -131,6 +131,14 @@ export async function submitAnswer({ questionId, language, code }) {
   }
 }
 
+export async function fetchExamQuestions() {
+  return api("/exam/questions");
+}
+
+export async function endExam() {
+  return api("/exam/end", { method: "POST", body: {} });
+}
+
 export function getQuestionSubmissionState(submissions, questionId) {
   return submissions?.[questionId]?.state ?? QuestionState.NOT_STARTED;
 }

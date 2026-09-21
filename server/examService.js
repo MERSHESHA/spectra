@@ -517,3 +517,108 @@ export async function submitAnswer(
     examComplete,
   };
 }
+
+const DEFAULT_STARTERS = {
+  python: "# Write your solution here\n\n",
+  c: "#include <stdio.h>\n\nint main() {\n    // Write your solution here\n    return 0;\n}\n",
+  java: "import java.util.Scanner;\n\npublic class Main {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        // Write your solution here\n    }\n}\n",
+};
+
+/**
+ * Student-safe question payload — no marks, no hidden test inputs/outputs.
+ */
+export async function getStudentQuestions(studentAuth) {
+  const db = requireDb();
+
+  const { data: student, error: sErr } = await db
+    .from("students")
+    .select("id, status")
+    .eq("id", studentAuth.studentId)
+    .single();
+  if (sErr || !student) throw httpError(404, "Student not found.");
+
+  const { data: questions, error } = await db
+    .from("questions")
+    .select(
+      "id, level, question_number, title, description, input_format, output_format, constraints, examples, starter_code"
+    )
+    .order("level", { ascending: true })
+    .order("question_number", { ascending: true });
+  if (error) throw mapDbError(error);
+
+  const levels = { 1: [], 2: [], 3: [] };
+  for (const q of questions || []) {
+    const starter = q.starter_code && typeof q.starter_code === "object"
+      ? q.starter_code
+      : {};
+    levels[q.level]?.push({
+      id: q.id,
+      title: q.title,
+      description: q.description,
+      inputFormat: q.input_format,
+      outputFormat: q.output_format,
+      constraints: q.constraints,
+      examples: Array.isArray(q.examples) ? q.examples : [],
+      starterCode: {
+        python: starter.python || DEFAULT_STARTERS.python,
+        c: starter.c || DEFAULT_STARTERS.c,
+        java: starter.java || DEFAULT_STARTERS.java,
+      },
+    });
+  }
+
+  return { levels };
+}
+
+/**
+ * Explicit End Test — save state, recompute scores, lock exam.
+ * Does not return marks to the student.
+ */
+export async function endExam(studentAuth) {
+  const db = requireDb();
+
+  const { data: student, error: sErr } = await db
+    .from("students")
+    .select("*")
+    .eq("id", studentAuth.studentId)
+    .single();
+  if (sErr || !student) throw httpError(404, "Student not found.");
+
+  if (student.status === "completed" || student.status === "time_expired") {
+    const submissions = await loadQuestionStatuses(db, student.id);
+    const unlockedLevel = await computeUnlockedLevel(db, student.id);
+    const token = signStudentToken({
+      studentId: student.id,
+      registerNumber: student.register_number,
+    });
+    return {
+      ok: true,
+      alreadyEnded: true,
+      ...buildExamState(student, submissions, unlockedLevel, token),
+    };
+  }
+
+  const endedAt = new Date().toISOString();
+  const { data: updated, error } = await db
+    .from("students")
+    .update({ status: "completed", exam_ended_at: endedAt })
+    .eq("id", student.id)
+    .select("*")
+    .single();
+  if (error) throw mapDbError(error);
+
+  await db.rpc("recompute_student_results", { p_student_id: student.id });
+
+  const submissions = await loadQuestionStatuses(db, updated.id);
+  const unlockedLevel = await computeUnlockedLevel(db, updated.id);
+  const token = signStudentToken({
+    studentId: updated.id,
+    registerNumber: updated.register_number,
+  });
+
+  return {
+    ok: true,
+    alreadyEnded: false,
+    ...buildExamState(updated, submissions, unlockedLevel, token),
+  };
+}

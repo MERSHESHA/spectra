@@ -246,6 +246,102 @@ api.get("/admin/evaluation-criteria", async (req, res) => {
   }
 });
 
+api.get("/admin/questions", async (req, res) => {
+  try {
+    requireAdmin(req);
+    const questions = await admin.listQuestions();
+    res.json({ questions });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+api.post("/admin/questions", async (req, res) => {
+  try {
+    requireAdmin(req);
+    const question = await admin.upsertQuestion(req.body || {});
+    res.json({ ok: true, question });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+api.put("/admin/questions/:id", async (req, res) => {
+  try {
+    requireAdmin(req);
+    const question = await admin.upsertQuestion({
+      ...(req.body || {}),
+      id: req.params.id,
+    });
+    res.json({ ok: true, question });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+api.delete("/admin/questions/:id", async (req, res) => {
+  try {
+    requireAdmin(req);
+    await admin.deleteQuestion(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+api.post("/admin/test-cases", async (req, res) => {
+  try {
+    requireAdmin(req);
+    const testCase = await admin.upsertTestCase(req.body || {});
+    res.json({ ok: true, testCase });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+api.put("/admin/test-cases/:id", async (req, res) => {
+  try {
+    requireAdmin(req);
+    const testCase = await admin.upsertTestCase({
+      ...(req.body || {}),
+      id: req.params.id,
+    });
+    res.json({ ok: true, testCase });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+api.delete("/admin/test-cases/:id", async (req, res) => {
+  try {
+    requireAdmin(req);
+    await admin.deleteTestCase(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+api.get("/exam/questions", async (req, res) => {
+  try {
+    const auth = requireStudent(req);
+    const data = await exam.getStudentQuestions(auth);
+    res.json(data);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+api.post("/exam/end", async (req, res) => {
+  try {
+    const auth = requireStudent(req);
+    const result = await exam.endExam(auth);
+    res.json(result);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 api.use((req, res) => {
   res.status(404).json({
     success: false,

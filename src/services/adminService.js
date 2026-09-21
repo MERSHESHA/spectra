@@ -97,6 +97,39 @@ export async function fetchEvaluationCriteria() {
   return adminApi("/admin/evaluation-criteria");
 }
 
+export async function fetchAdminQuestions() {
+  const data = await adminApi("/admin/questions");
+  return data.questions || [];
+}
+
+export async function saveAdminQuestion(payload) {
+  if (payload.id) {
+    return adminApi(`/admin/questions/${payload.id}`, {
+      method: "PUT",
+      body: payload,
+    });
+  }
+  return adminApi("/admin/questions", { method: "POST", body: payload });
+}
+
+export async function deleteAdminQuestion(id) {
+  return adminApi(`/admin/questions/${id}`, { method: "DELETE" });
+}
+
+export async function saveAdminTestCase(payload) {
+  if (payload.id) {
+    return adminApi(`/admin/test-cases/${payload.id}`, {
+      method: "PUT",
+      body: payload,
+    });
+  }
+  return adminApi("/admin/test-cases", { method: "POST", body: payload });
+}
+
+export async function deleteAdminTestCase(id) {
+  return adminApi(`/admin/test-cases/${id}`, { method: "DELETE" });
+}
+
 /** Login without requiring an existing token */
 export async function loginRequest(username, password) {
   let response;
