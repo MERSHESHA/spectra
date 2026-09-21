@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { clearExamSession } from "../services/examService";
+import { clearExamSession, startExam } from "../services/examService";
+
 
 const departments = [
   "CSE",
@@ -25,6 +26,8 @@ export default function LandingPage() {
   });
 
   const [errors, setErrors] = useState({});
+  const [submitError, setSubmitError] = useState("");
+  const [starting, setStarting] = useState(false);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -79,8 +82,9 @@ export default function LandingPage() {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setSubmitError("");
 
     if (!validateForm()) return;
 
@@ -91,17 +95,21 @@ export default function LandingPage() {
       year: formData.year,
     };
 
-    // Store participant details for the current exam session
-    sessionStorage.setItem(
-      "codingParticipant",
-      JSON.stringify(participant)
-    );
+    setStarting(true);
+    try {
+      sessionStorage.setItem("codingParticipant", JSON.stringify(participant));
+      clearExamSession();
+      sessionStorage.removeItem("examSession");
 
-    // Clear any previous exam session so a new registration starts fresh
-    clearExamSession();
-    sessionStorage.removeItem("examSession");
-
-    navigate("/coding");
+      await startExam(participant);
+      navigate("/coding");
+    } catch (err) {
+      setSubmitError(
+        err.message || "Unable to connect to server. Please try again."
+      );
+    } finally {
+      setStarting(false);
+    }
   };
 
   return (
@@ -320,11 +328,16 @@ export default function LandingPage() {
                 </div>
 
                 {/* Submit */}
+                {submitError && (
+                  <p className="text-sm text-red-400">{submitError}</p>
+                )}
+
                 <button
                   type="submit"
-                  className="group flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-5 py-3.5 font-bold text-black transition hover:bg-cyan-300 active:scale-[0.98]"
+                  disabled={starting}
+                  className="group flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-5 py-3.5 font-bold text-black transition hover:bg-cyan-300 active:scale-[0.98] disabled:opacity-50"
                 >
-                  Start Coding
+                  {starting ? "Starting…" : "Start Coding"}
                   <span className="transition-transform group-hover:translate-x-1">
                     →
                   </span>

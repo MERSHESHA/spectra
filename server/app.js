@@ -27,7 +27,6 @@ app.use(
       if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
         return callback(null, true);
       }
-      // Same-origin Vercel deployments do not send cross-origin requests
       return callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
@@ -36,10 +35,22 @@ app.use(
 
 app.use(express.json({ limit: "1mb" }));
 
-// Vercel catch-all (`api/[...path].js`) may strip the `/api` prefix from req.url.
-// Restore it so Express routes defined as `/api/...` still match.
+/**
+ * Vercel may invoke this app as /api (after rewrite) with either:
+ *   /api/exam/start  or  /exam/start
+ * Normalize so Express routes always see /api/...
+ */
 app.use((req, _res, next) => {
-  if (req.url && !req.url.startsWith("/api")) {
+  const headerPath =
+    req.headers["x-invoke-path"] ||
+    req.headers["x-forwarded-uri"] ||
+    "";
+  const raw = String(headerPath || req.originalUrl || req.url || "");
+  const pathOnly = raw.split("?")[0];
+  if (pathOnly && pathOnly !== "/" && !pathOnly.startsWith("/api")) {
+    const suffix = pathOnly.startsWith("/") ? pathOnly : `/${pathOnly}`;
+    req.url = `/api${suffix}${raw.includes("?") ? raw.slice(raw.indexOf("?")) : ""}`;
+  } else if (req.url && !req.url.startsWith("/api") && req.url !== "/") {
     req.url = `/api${req.url.startsWith("/") ? req.url : `/${req.url}`}`;
   }
   next();
@@ -56,13 +67,13 @@ function sendError(res, err) {
   });
 }
 
-/** Liveness — does not depend on Supabase */
-app.get("/api/health", (_req, res) => {
+const api = express.Router();
+
+api.get("/health", (_req, res) => {
   res.json({ ok: true, service: "api", status: "ok" });
 });
 
-/** Supabase connectivity check */
-app.get("/api/health/supabase", async (_req, res) => {
+api.get("/health/supabase", async (_req, res) => {
   try {
     const status = getSupabaseConfigStatus();
     if (!status.configured) {
@@ -120,9 +131,7 @@ app.get("/api/health/supabase", async (_req, res) => {
   }
 });
 
-/* ========================= Exam (student) ========================= */
-
-app.post("/api/exam/start", async (req, res) => {
+api.post("/exam/start", async (req, res) => {
   try {
     const state = await exam.startExam(req.body);
     res.json(state);
@@ -131,7 +140,7 @@ app.post("/api/exam/start", async (req, res) => {
   }
 });
 
-app.get("/api/exam/state", async (req, res) => {
+api.get("/exam/state", async (req, res) => {
   try {
     const auth = requireStudent(req);
     const state = await exam.getExamState(auth);
@@ -141,7 +150,7 @@ app.get("/api/exam/state", async (req, res) => {
   }
 });
 
-app.post("/api/exam/submit", async (req, res) => {
+api.post("/exam/submit", async (req, res) => {
   try {
     const auth = requireStudent(req);
     const result = await exam.submitAnswer(auth, req.body);
@@ -151,7 +160,7 @@ app.post("/api/exam/submit", async (req, res) => {
   }
 });
 
-app.post("/api/execute", async (req, res) => {
+api.post("/execute", async (req, res) => {
   try {
     const auth = requireStudent(req);
     const { questionId, language, code } = req.body || {};
@@ -162,9 +171,7 @@ app.post("/api/execute", async (req, res) => {
   }
 });
 
-/* ========================= Admin ========================= */
-
-app.post("/api/admin/login", async (req, res) => {
+api.post("/admin/login", async (req, res) => {
   try {
     const { username, password } = req.body || {};
     const result = await admin.adminLogin(username, password);
@@ -174,7 +181,7 @@ app.post("/api/admin/login", async (req, res) => {
   }
 });
 
-app.get("/api/admin/me", async (req, res) => {
+api.get("/admin/me", async (req, res) => {
   try {
     const auth = requireAdmin(req);
     res.json({
@@ -188,7 +195,7 @@ app.get("/api/admin/me", async (req, res) => {
   }
 });
 
-app.get("/api/admin/overview", async (req, res) => {
+api.get("/admin/overview", async (req, res) => {
   try {
     requireAdmin(req);
     const overview = await admin.getOverview();
@@ -198,7 +205,7 @@ app.get("/api/admin/overview", async (req, res) => {
   }
 });
 
-app.get("/api/admin/leaderboard", async (req, res) => {
+api.get("/admin/leaderboard", async (req, res) => {
   try {
     requireAdmin(req);
     const leaderboard = await admin.getLeaderboard();
@@ -208,7 +215,7 @@ app.get("/api/admin/leaderboard", async (req, res) => {
   }
 });
 
-app.get("/api/admin/students/:id", async (req, res) => {
+api.get("/admin/students/:id", async (req, res) => {
   try {
     requireAdmin(req);
     const detail = await admin.getStudentDetail(req.params.id);
@@ -218,7 +225,7 @@ app.get("/api/admin/students/:id", async (req, res) => {
   }
 });
 
-app.get("/api/admin/evaluation-criteria", async (req, res) => {
+api.get("/admin/evaluation-criteria", async (req, res) => {
   try {
     requireAdmin(req);
     res.json(admin.getEvaluationCriteria());
@@ -227,7 +234,19 @@ app.get("/api/admin/evaluation-criteria", async (req, res) => {
   }
 });
 
-// Eager init when configured (safe no-op if missing)
+api.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    ok: false,
+    error: "NOT_FOUND",
+    message: `No API route for ${req.method} ${req.originalUrl || req.url}`,
+  });
+});
+
+// Mount at both prefixes so local (`/api/...`) and Vercel rewrite (`/exam/...`) work.
+app.use("/api", api);
+app.use("/", api);
+
 try {
   const bootStatus = getSupabaseConfigStatus();
   if (bootStatus.configured) getSupabaseAdmin();
