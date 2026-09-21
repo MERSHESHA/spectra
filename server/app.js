@@ -14,20 +14,32 @@ const allowedOrigins = (
   "http://localhost:5173,http://127.0.0.1:5173"
 )
   .split(",")
-  .map((s) => s.trim())
+  .map((s) => s.trim().replace(/\/$/, ""))
   .filter(Boolean);
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  if (allowedOrigins.includes("*") || allowedOrigins.includes(origin)) return true;
+  if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) return true;
+  // This Vercel deployment (production + preview URLs)
+  if (process.env.VERCEL_URL && origin === `https://${process.env.VERCEL_URL}`) {
+    return true;
+  }
+  if (
+    process.env.VERCEL_PROJECT_PRODUCTION_URL &&
+    origin === `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+  ) {
+    return true;
+  }
+  if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return true;
+  return false;
+}
 
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin) || allowedOrigins.includes("*")) {
-        return callback(null, true);
-      }
-      if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error("Not allowed by CORS"));
+      // Never throw — a thrown error becomes HTTP 500 in the browser.
+      callback(null, isAllowedOrigin(origin));
     },
     credentials: true,
   })
