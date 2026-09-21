@@ -3,7 +3,7 @@
  * Backend loads test cases from Supabase; client does not send expected output.
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
+import { apiUrl } from "../lib/apiBase";
 
 function getStudentToken() {
   return sessionStorage.getItem("examSessionToken");
@@ -18,11 +18,15 @@ export async function runCodeAgainstTestCases({
   if (!questionId) throw new Error("Missing question id.");
 
   const token = getStudentToken();
-  if (!token) throw new Error("Exam session not found. Please re-enter from the landing page.");
+  if (!token) {
+    throw new Error(
+      "Exam session not found. Please re-enter from the landing page."
+    );
+  }
 
   let response;
   try {
-    response = await fetch(`${API_BASE}/execute`, {
+    response = await fetch(apiUrl("/execute"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -31,7 +35,7 @@ export async function runCodeAgainstTestCases({
       body: JSON.stringify({ language, code, questionId }),
     });
   } catch {
-    throw new Error("Unable to reach the code execution service.");
+    throw new Error("Unable to connect to server");
   }
 
   let data;

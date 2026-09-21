@@ -3,7 +3,7 @@
  * Talks only to the backend — never reads scores/leaderboard.
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
+import { apiUrl } from "../lib/apiBase";
 
 const PARTICIPANT_KEY = "codingParticipant";
 const SESSION_KEY = "examSessionToken";
@@ -59,13 +59,13 @@ async function api(path, { method = "GET", body, auth = true } = {}) {
 
   let response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
+    response = await fetch(apiUrl(path), {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new Error("Unable to reach the exam server. Is the API running?");
+    throw new Error("Unable to connect to server");
   }
 
   let data;

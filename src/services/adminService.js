@@ -3,7 +3,8 @@
  * Scores / leaderboard are never exposed on student endpoints.
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
+import { apiUrl } from "../lib/apiBase";
+
 const ADMIN_TOKEN_KEY = "adminToken";
 const ADMIN_USER_KEY = "adminUsername";
 
@@ -32,13 +33,13 @@ async function adminApi(path, { method = "GET", body } = {}) {
 
   let response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
+    response = await fetch(apiUrl(path), {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new Error("Unable to reach the admin API.");
+    throw new Error("Unable to connect to server");
   }
 
   let data;
@@ -65,7 +66,6 @@ export async function adminLogin(username, password) {
     method: "POST",
     body: { username, password },
   });
-  // login endpoint doesn't need prior token — adminApi still works without one
   setAdminSession(data.token, data.username);
   return data;
 }
@@ -97,17 +97,17 @@ export async function fetchEvaluationCriteria() {
   return adminApi("/admin/evaluation-criteria");
 }
 
-/** Special-case login without requiring existing token */
+/** Login without requiring an existing token */
 export async function loginRequest(username, password) {
   let response;
   try {
-    response = await fetch(`${API_BASE}/admin/login`, {
+    response = await fetch(apiUrl("/admin/login"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
     });
   } catch {
-    throw new Error("Unable to reach the admin API. Is the server running?");
+    throw new Error("Unable to connect to server");
   }
 
   const data = await response.json().catch(() => ({}));
