@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { clearExamSession } from "../services/examService";
 
 const departments = [
   "CSE",
@@ -61,6 +62,8 @@ export default function LandingPage() {
 
     if (!formData.name.trim()) {
       newErrors.name = "Please enter your name.";
+    } else if (!/^[a-zA-Z\s]+$/.test(formData.name.trim())) {
+      newErrors.name = "Name must contain letters and spaces only.";
     }
 
     if (!formData.department) {
@@ -81,11 +84,22 @@ export default function LandingPage() {
 
     if (!validateForm()) return;
 
-    // Store participant details for the coding page
+    const participant = {
+      registerNumber: formData.registerNumber,
+      name: formData.name.trim(),
+      department: formData.department,
+      year: formData.year,
+    };
+
+    // Store participant details for the current exam session
     sessionStorage.setItem(
       "codingParticipant",
-      JSON.stringify(formData)
+      JSON.stringify(participant)
     );
+
+    // Clear any previous exam session so a new registration starts fresh
+    clearExamSession();
+    sessionStorage.removeItem("examSession");
 
     navigate("/coding");
   };

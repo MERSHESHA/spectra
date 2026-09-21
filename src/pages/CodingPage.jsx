@@ -1,117 +1,383 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+
+import CodeEditor from "../components/CodeEditor";
+import QuestionPanel from "../components/QuestionPanel";
+import TestResults from "../components/TestResults";
+import { levels, LEVEL_IDS, getQuestionsForLevel } from "../data/questions";
+import { useExamFullscreen, useExamTimer } from "../hooks/useExam";
+import { runCodeAgainstTestCases } from "../services/codeExecutionService";
+import {
+  getStoredParticipant,
+  getQuestionSubmissionState,
+  QuestionState,
+  startExam,
+  submitAnswer,
+} from "../services/examService";
+
+const LANGUAGES = [
+  { value: "python", label: "Python" },
+  { value: "c", label: "C" },
+  { value: "java", label: "Java" },
+];
+
+function starterFor(question, language) {
+  return question?.starterCode?.[language] ?? "";
+}
 
 export default function CodingPage() {
   const navigate = useNavigate();
 
   const [participant, setParticipant] = useState(null);
-  const [currentLevel, setCurrentLevel] = useState(1);
-  const [completedLevels, setCompletedLevels] = useState([]);
+  const [examMeta, setExamMeta] = useState(null); // { startedAt, endsAt, examId }
+  const [submissions, setSubmissions] = useState({});
+  const [unlockedLevel, setUnlockedLevel] = useState(1);
+  const [examComplete, setExamComplete] = useState(false);
+  const [bootError, setBootError] = useState(null);
 
-  const [timeLeft, setTimeLeft] = useState(60 * 60);
+  const [activeLevel, setActiveLevel] = useState(1);
+  const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
 
+  // Per-question local editor state (no continuous backend writes)
+  const [editorState, setEditorState] = useState({});
+  // Per-question run results
+  const [runState, setRunState] = useState({});
+
+  const [submitting, setSubmitting] = useState(false);
+
+  const { remainingMs, expired, formatTime } = useExamTimer(examMeta?.endsAt);
+  const {
+    containerRef,
+    showWarning,
+    enterFullscreen,
+  } = useExamFullscreen(Boolean(participant && examMeta && !expired && !examComplete));
+
+  const questions = useMemo(
+    () => getQuestionsForLevel(activeLevel),
+    [activeLevel]
+  );
+  const currentQuestion = questions[activeQuestionIndex] ?? null;
+  const currentQuestionId = currentQuestion?.id;
+
+  const questionStatus = getQuestionSubmissionState(
+    submissions,
+    currentQuestionId
+  );
+  const isSubmitted = questionStatus === QuestionState.SUBMITTED;
+
+  const currentEditor = currentQuestionId
+    ? editorState[currentQuestionId]
+    : null;
+  const language = currentEditor?.language ?? "python";
+  const code = currentEditor?.code ?? "";
+
+  const currentRun = currentQuestionId ? runState[currentQuestionId] : null;
+
+  /* ---------- Boot exam session ---------- */
   useEffect(() => {
-    const savedParticipant = sessionStorage.getItem("codingParticipant");
+    let cancelled = false;
 
-    if (!savedParticipant) {
-      navigate("/");
-      return;
+    async function boot() {
+      const saved = getStoredParticipant();
+      if (!saved) {
+        navigate("/");
+        return;
+      }
+
+      try {
+        const state = await startExam(saved);
+        if (cancelled) return;
+
+        setParticipant(saved);
+        setExamMeta({
+          examId: state.examId,
+          startedAt: state.startedAt,
+          endsAt: state.endsAt,
+        });
+        setSubmissions(state.submissions || {});
+        setUnlockedLevel(state.unlockedLevel || 1);
+        setExamComplete(Boolean(state.examComplete));
+        setActiveLevel(state.unlockedLevel || 1);
+        setActiveQuestionIndex(0);
+      } catch (err) {
+        if (!cancelled) {
+          setBootError(err.message || "Failed to start exam.");
+        }
+      }
     }
 
-    setParticipant(JSON.parse(savedParticipant));
-
-    const savedLevel =
-      Number(sessionStorage.getItem("currentLevel")) || 1;
-
-    const savedCompleted = JSON.parse(
-      sessionStorage.getItem("completedLevels") || "[]"
-    );
-
-    setCurrentLevel(savedLevel);
-    setCompletedLevels(savedCompleted);
+    boot();
+    return () => {
+      cancelled = true;
+    };
   }, [navigate]);
 
-  // Timer
+  /* ---------- Ensure editor state exists for active question ---------- */
   useEffect(() => {
-    if (timeLeft <= 0) {
+    if (!currentQuestion) return;
+
+    setEditorState((prev) => {
+      if (prev[currentQuestion.id]) return prev;
+      const lang = "python";
+      return {
+        ...prev,
+        [currentQuestion.id]: {
+          language: lang,
+          code: starterFor(currentQuestion, lang),
+        },
+      };
+    });
+  }, [currentQuestion]);
+
+  const setLanguage = useCallback(
+    (nextLang) => {
+      if (!currentQuestion || isSubmitted || expired) return;
+      setEditorState((prev) => {
+        const existing = prev[currentQuestion.id];
+        const prevLang = existing?.language ?? "python";
+        const prevCode = existing?.code ?? "";
+        const wasStarter =
+          !prevCode.trim() ||
+          prevCode === starterFor(currentQuestion, prevLang);
+
+        return {
+          ...prev,
+          [currentQuestion.id]: {
+            language: nextLang,
+            code: wasStarter
+              ? starterFor(currentQuestion, nextLang)
+              : prevCode,
+          },
+        };
+      });
+      // Clear previous run results when language changes
+      setRunState((prev) => {
+        const next = { ...prev };
+        delete next[currentQuestion.id];
+        return next;
+      });
+    },
+    [currentQuestion, isSubmitted, expired]
+  );
+
+  const setCode = useCallback(
+    (nextCode) => {
+      if (!currentQuestion || isSubmitted || expired) return;
+      setEditorState((prev) => ({
+        ...prev,
+        [currentQuestion.id]: {
+          language: prev[currentQuestion.id]?.language ?? "python",
+          code: nextCode,
+        },
+      }));
+    },
+    [currentQuestion, isSubmitted, expired]
+  );
+
+  const handleSelectLevel = (level) => {
+    if (level > unlockedLevel) return;
+    setActiveLevel(level);
+    setActiveQuestionIndex(0);
+  };
+
+  const handleSelectQuestion = (index) => {
+    if (index < 0 || index >= questions.length) return;
+    setActiveQuestionIndex(index);
+  };
+
+  const handleRunCode = async () => {
+    if (!currentQuestion || isSubmitted || expired || examComplete) return;
+    if (!code.trim()) return;
+
+    const qid = currentQuestion.id;
+
+    setRunState((prev) => ({
+      ...prev,
+      [qid]: { status: "running", message: null, results: null },
+    }));
+
+    try {
+      const result = await runCodeAgainstTestCases({
+        language,
+        code,
+        questionId: qid,
+      });
+
+      setRunState((prev) => ({
+        ...prev,
+        [qid]: {
+          status: result.status,
+          message: result.message,
+          results: result.results,
+        },
+      }));
+    } catch (err) {
+      setRunState((prev) => ({
+        ...prev,
+        [qid]: {
+          status: "error",
+          message: err.message || "Failed to run code.",
+          results: null,
+        },
+      }));
+    }
+  };
+
+  const handleSubmitAnswer = async () => {
+    if (!currentQuestion || isSubmitted || expired || examComplete || submitting)
       return;
-    }
+    if (!code.trim()) return;
 
-    const timer = setInterval(() => {
-      setTimeLeft((previous) => previous - 1);
-    }, 1000);
+    setSubmitting(true);
+    try {
+      const result = await submitAnswer({
+        questionId: currentQuestion.id,
+        language,
+        code,
+      });
 
-    return () => clearInterval(timer);
-  }, [timeLeft]);
+      if (!result.ok) {
+        if (result.error === "EXAM_ENDED") {
+          setExamComplete(false);
+          // Timer will flip expired via endsAt
+        }
+        setSubmitting(false);
+        return;
+      }
 
-  const formatTime = () => {
-    const hours = Math.floor(timeLeft / 3600);
-    const minutes = Math.floor((timeLeft % 3600) / 60);
-    const seconds = timeLeft % 60;
+      setSubmissions((prev) => ({
+        ...prev,
+        [currentQuestion.id]: {
+          state: QuestionState.SUBMITTED,
+          submittedAt: Date.now(),
+          language,
+        },
+      }));
 
-    return `${String(hours).padStart(2, "0")}:${String(
-      minutes
-    ).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  };
+      if (result.unlockedLevel) {
+        setUnlockedLevel(result.unlockedLevel);
+      }
+      if (result.examComplete) {
+        setExamComplete(true);
+      }
 
-  const handleLevelComplete = (level) => {
-    const updatedCompleted = [
-      ...new Set([...completedLevels, level]),
-    ];
-
-    setCompletedLevels(updatedCompleted);
-
-    sessionStorage.setItem(
-      "completedLevels",
-      JSON.stringify(updatedCompleted)
-    );
-
-    if (level < 3) {
-      const nextLevel = level + 1;
-
-      setCurrentLevel(nextLevel);
-
-      sessionStorage.setItem(
-        "currentLevel",
-        String(nextLevel)
+      // Auto-advance to next unsubmitted question in level, if any
+      const levelQuestions = getQuestionsForLevel(activeLevel);
+      const nextIndex = levelQuestions.findIndex(
+        (q, i) =>
+          i > activeQuestionIndex &&
+          getQuestionSubmissionState(
+            {
+              ...submissions,
+              [currentQuestion.id]: { state: QuestionState.SUBMITTED },
+            },
+            q.id
+          ) !== QuestionState.SUBMITTED
       );
+
+      if (nextIndex >= 0) {
+        setActiveQuestionIndex(nextIndex);
+      } else if (
+        result.levelJustUnlocked &&
+        result.levelJustUnlocked <= 3
+      ) {
+        setActiveLevel(result.levelJustUnlocked);
+        setActiveQuestionIndex(0);
+      }
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  if (!participant) {
-    return null;
+  if (bootError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#050505] text-white">
+        <p className="text-red-400">{bootError}</p>
+      </div>
+    );
   }
 
+  if (!participant || !examMeta) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#050505] text-white">
+        <p className="text-sm text-gray-500">Loading exam…</p>
+      </div>
+    );
+  }
+
+  const examEnded = expired || examComplete;
+  const runDisabled =
+    examEnded ||
+    isSubmitted ||
+    currentRun?.status === "running" ||
+    !code.trim();
+  const submitDisabled =
+    examEnded || isSubmitted || submitting || !code.trim();
+
   return (
-    <div className="min-h-screen bg-[#050505] text-white">
+    <div
+      ref={containerRef}
+      className="h-screen overflow-x-hidden overflow-y-auto bg-[#050505] text-white"
+    >
+      {/* Fullscreen warning */}
+      {showWarning && !examEnded && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 px-5">
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#111] p-6 text-center shadow-2xl">
+            <h2 className="text-xl font-bold">Fullscreen required</h2>
+            <p className="mt-3 text-sm leading-6 text-gray-400">
+              The exam should remain in fullscreen mode. Your browser may exit
+              fullscreen when Escape is pressed — click below to return.
+            </p>
+            <button
+              type="button"
+              onClick={enterFullscreen}
+              className="mt-6 w-full rounded-xl bg-cyan-400 px-5 py-3 font-bold text-black transition hover:bg-cyan-300"
+            >
+              Return to Fullscreen
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Exam ended overlay */}
+      {examEnded && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/85 px-5">
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#111] p-8 text-center shadow-2xl">
+            <h2 className="text-2xl font-bold">
+              {examComplete ? "Exam Completed" : "Time's Up"}
+            </h2>
+            <p className="mt-3 text-sm leading-6 text-gray-400">
+              {examComplete
+                ? "You have submitted all questions. The exam is complete."
+                : "The 60-minute exam has ended. Submissions are no longer accepted."}
+            </p>
+            <p className="mt-4 text-xs text-gray-600">
+              {participant.name} · {participant.registerNumber}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="sticky top-0 z-50 border-b border-white/10 bg-[#050505]/95 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-[1600px] items-center justify-between px-5">
-          {/* Logo */}
+        <div className="mx-auto flex h-16 max-w-[1600px] items-center justify-between gap-4 px-5">
           <div>
             <h1 className="text-lg font-bold tracking-wide">
               CODE<span className="text-cyan-400">X</span>
             </h1>
-            <p className="text-[10px] text-gray-500">
-              CODING CHALLENGE
-            </p>
+            <p className="text-[10px] text-gray-500">CODING CHALLENGE</p>
           </div>
 
-          {/* Student */}
           <div className="hidden text-right sm:block">
-            <p className="text-sm font-medium">
-              {participant.name}
-            </p>
-
+            <p className="text-sm font-medium">{participant.name}</p>
             <p className="text-xs text-gray-500">
               {participant.registerNumber}
             </p>
           </div>
 
-          {/* Timer */}
           <div
             className={`rounded-lg border px-4 py-2 font-mono text-sm font-bold ${
-              timeLeft <= 300
+              remainingMs <= 5 * 60 * 1000
                 ? "border-red-500/30 bg-red-500/10 text-red-400"
                 : "border-white/10 bg-white/5 text-cyan-400"
             }`}
@@ -121,63 +387,70 @@ export default function CodingPage() {
         </div>
       </header>
 
-      {/* Progress */}
+      {/* Level navigation */}
       <div className="border-b border-white/10 bg-white/[0.02]">
         <div className="mx-auto flex max-w-[1600px] items-center px-5">
-          {[1, 2, 3].map((level) => {
-            const isCompleted =
-              completedLevels.includes(level);
-
-            const isCurrent = currentLevel === level;
-
-            const isLocked =
-              level > currentLevel;
+          {LEVEL_IDS.map((level) => {
+            const levelQuestions = levels[level];
+            const allSubmitted = levelQuestions.every(
+              (q) =>
+                getQuestionSubmissionState(submissions, q.id) ===
+                QuestionState.SUBMITTED
+            );
+            const isLocked = level > unlockedLevel;
+            const isCurrent = activeLevel === level && !allSubmitted;
+            const isCompleted = allSubmitted;
 
             return (
-              <div
-                key={level}
-                className="flex flex-1 items-center"
-              >
-                <div className="flex items-center gap-3 py-4">
+              <div key={level} className="flex flex-1 items-center">
+                <button
+                  type="button"
+                  disabled={isLocked}
+                  onClick={() => handleSelectLevel(level)}
+                  className={`flex items-center gap-3 py-4 text-left transition ${
+                    isLocked
+                      ? "cursor-not-allowed opacity-50"
+                      : "hover:opacity-90"
+                  }`}
+                >
                   <div
                     className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold ${
                       isCompleted
                         ? "bg-green-400 text-black"
                         : isCurrent
                         ? "bg-cyan-400 text-black"
-                        : "bg-white/10 text-gray-500"
+                        : isLocked
+                        ? "bg-white/10 text-gray-500"
+                        : "bg-white/10 text-gray-300"
                     }`}
                   >
-                    {isCompleted ? "✓" : level}
+                    {isCompleted ? "✓" : isLocked ? "🔒" : level}
                   </div>
 
                   <div className="hidden sm:block">
                     <p
                       className={`text-sm font-medium ${
-                        isLocked
-                          ? "text-gray-600"
-                          : "text-gray-200"
+                        isLocked ? "text-gray-600" : "text-gray-200"
                       }`}
                     >
                       Level {level}
                     </p>
-
                     <p className="text-[11px] text-gray-600">
                       {isCompleted
-                        ? "Completed"
+                        ? "✓ Completed"
                         : isCurrent
-                        ? "Current"
-                        : "Locked"}
+                        ? "● Current"
+                        : isLocked
+                        ? "🔒 Locked"
+                        : "Available"}
                     </p>
                   </div>
-                </div>
+                </button>
 
                 {level !== 3 && (
                   <div
                     className={`mx-4 h-px flex-1 ${
-                      completedLevels.includes(level)
-                        ? "bg-green-400/50"
-                        : "bg-white/10"
+                      allSubmitted ? "bg-green-400/50" : "bg-white/10"
                     }`}
                   />
                 )}
@@ -187,443 +460,121 @@ export default function CodingPage() {
         </div>
       </div>
 
-      {/* Main */}
+      {/* Question tabs */}
+      <div className="border-b border-white/10">
+        <div className="mx-auto flex max-w-[1600px] gap-2 overflow-x-auto px-5 py-3">
+          {questions.map((q, index) => {
+            const state = getQuestionSubmissionState(submissions, q.id);
+            const selected = index === activeQuestionIndex;
+            const submitted = state === QuestionState.SUBMITTED;
+
+            return (
+              <button
+                key={q.id}
+                type="button"
+                onClick={() => handleSelectQuestion(index)}
+                className={`shrink-0 rounded-lg border px-4 py-2 text-sm font-medium transition ${
+                  selected
+                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                    : "border-white/10 bg-white/[0.02] text-gray-400 hover:bg-white/[0.05]"
+                }`}
+              >
+                Question {index + 1}
+                {submitted && (
+                  <span className="ml-2 text-green-400">✓ Submitted</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Main workspace */}
       <main className="mx-auto max-w-[1600px] px-5 py-6">
-        {currentLevel === 1 && (
-          <Level1
-            onComplete={() => handleLevelComplete(1)}
-          />
-        )}
+        {currentQuestion && (
+          <div className="grid gap-6 lg:grid-cols-[420px_1fr]">
+            <QuestionPanel
+              level={activeLevel}
+              question={currentQuestion}
+              questionNumber={activeQuestionIndex + 1}
+              totalInLevel={questions.length}
+            />
 
-        {currentLevel === 2 && (
-          <Level2
-            onComplete={() => handleLevelComplete(2)}
-          />
-        )}
+            <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#0b0b0b]">
+              {/* Editor toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-white/[0.03] px-4 py-3">
+                <select
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value)}
+                  disabled={isSubmitted || examEnded}
+                  className="rounded-lg border border-white/10 bg-black px-3 py-2 text-sm text-white outline-none disabled:opacity-50"
+                >
+                  {LANGUAGES.map((lang) => (
+                    <option key={lang.value} value={lang.value}>
+                      {lang.label}
+                    </option>
+                  ))}
+                </select>
 
-        {currentLevel === 3 && (
-          <Level3
-            onComplete={() => handleLevelComplete(3)}
-          />
+                <div className="flex items-center gap-3 text-xs text-gray-500">
+                  {isSubmitted ? (
+                    <span className="font-semibold text-green-400">
+                      ✓ Submitted
+                    </span>
+                  ) : (
+                    <span>Your code is evaluated against test cases</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-4">
+                <CodeEditor
+                  language={language}
+                  code={code}
+                  onChange={setCode}
+                  readOnly={isSubmitted || examEnded}
+                />
+              </div>
+
+              {/* Test results — pass/fail only, never marks */}
+              <div className="border-t border-white/10 px-4 py-4">
+                <TestResults
+                  status={currentRun?.status}
+                  message={currentRun?.message}
+                  results={currentRun?.results}
+                />
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col gap-3 border-t border-white/10 bg-white/[0.02] p-4 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={handleRunCode}
+                  disabled={runDisabled}
+                  className="rounded-xl border border-white/10 px-6 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {currentRun?.status === "running"
+                    ? "Running..."
+                    : "▶ Run Code"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSubmitAnswer}
+                  disabled={submitDisabled}
+                  className="rounded-xl bg-cyan-400 px-6 py-3 text-sm font-bold text-black transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isSubmitted
+                    ? "✓ Submitted"
+                    : submitting
+                    ? "Submitting…"
+                    : "Submit Answer"}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </main>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------
-   LEVEL 1
-------------------------------------------------------- */
-
-function Level1({ onComplete }) {
-  const [code, setCode] = useState(
-`# Write your solution here
-
-def solve():
-    pass
-
-solve()`
-  );
-
-  const [language, setLanguage] = useState("python");
-  const [result, setResult] = useState(null);
-  const [submitted, setSubmitted] = useState(false);
-
-  const runCode = () => {
-    setResult("running");
-
-    // Temporary frontend simulation.
-    // Later this will call your backend.
-    setTimeout(() => {
-      setResult("success");
-    }, 1200);
-  };
-
-  const submitAnswer = () => {
-    if (!result || result === "running") {
-      return;
-    }
-
-    setSubmitted(true);
-
-    setTimeout(() => {
-      onComplete();
-    }, 500);
-  };
-
-  return (
-    <div className="grid gap-6 lg:grid-cols-[420px_1fr]">
-      {/* Question */}
-      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6">
-        <div className="mb-6 flex items-center justify-between">
-          <span className="rounded-full bg-cyan-400/10 px-3 py-1 text-xs font-semibold text-cyan-400">
-            LEVEL 1
-          </span>
-
-          <span className="text-xs text-gray-500">
-            Problem 1
-          </span>
-        </div>
-
-        <h2 className="text-2xl font-bold">
-          Sum of Two Numbers
-        </h2>
-
-        <p className="mt-4 text-sm leading-7 text-gray-400">
-          Write a program that reads two integers and prints
-          their sum.
-        </p>
-
-        <div className="mt-6">
-          <h3 className="text-sm font-semibold">
-            Input
-          </h3>
-
-          <p className="mt-2 rounded-lg bg-black/40 p-3 font-mono text-sm text-gray-400">
-            Two integers A and B
-          </p>
-        </div>
-
-        <div className="mt-5">
-          <h3 className="text-sm font-semibold">
-            Output
-          </h3>
-
-          <p className="mt-2 rounded-lg bg-black/40 p-3 font-mono text-sm text-gray-400">
-            Print A + B
-          </p>
-        </div>
-
-        <div className="mt-5">
-          <h3 className="text-sm font-semibold">
-            Example
-          </h3>
-
-          <div className="mt-2 rounded-lg bg-black/40 p-4 font-mono text-sm">
-            <p className="text-gray-500">Input</p>
-            <p>5 10</p>
-
-            <p className="mt-3 text-gray-500">Output</p>
-            <p>15</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Editor */}
-      <CodeEditor
-        language={language}
-        setLanguage={setLanguage}
-        code={code}
-        setCode={setCode}
-        result={result}
-        runCode={runCode}
-        submitAnswer={submitAnswer}
-        submitted={submitted}
-      />
-    </div>
-  );
-}
-
-/* -------------------------------------------------------
-   LEVEL 2
-------------------------------------------------------- */
-
-function Level2({ onComplete }) {
-  const [code, setCode] = useState(
-`# Write your Level 2 solution here
-
-def solve():
-    pass
-
-solve()`
-  );
-
-  const [language, setLanguage] = useState("python");
-  const [result, setResult] = useState(null);
-  const [submitted, setSubmitted] = useState(false);
-
-  const runCode = () => {
-    setResult("running");
-
-    setTimeout(() => {
-      setResult("success");
-    }, 1200);
-  };
-
-  const submitAnswer = () => {
-    if (!result || result === "running") return;
-
-    setSubmitted(true);
-
-    setTimeout(() => {
-      onComplete();
-    }, 500);
-  };
-
-  return (
-    <div className="grid gap-6 lg:grid-cols-[420px_1fr]">
-      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6">
-        <span className="rounded-full bg-purple-400/10 px-3 py-1 text-xs font-semibold text-purple-400">
-          LEVEL 2
-        </span>
-
-        <h2 className="mt-6 text-2xl font-bold">
-          Find the Maximum
-        </h2>
-
-        <p className="mt-4 text-sm leading-7 text-gray-400">
-          Write a program that reads three integers and
-          prints the largest number.
-        </p>
-
-        <div className="mt-6">
-          <h3 className="text-sm font-semibold">
-            Example
-          </h3>
-
-          <div className="mt-2 rounded-lg bg-black/40 p-4 font-mono text-sm">
-            <p className="text-gray-500">Input</p>
-            <p>10 25 15</p>
-
-            <p className="mt-3 text-gray-500">Output</p>
-            <p>25</p>
-          </div>
-        </div>
-      </div>
-
-      <CodeEditor
-        language={language}
-        setLanguage={setLanguage}
-        code={code}
-        setCode={setCode}
-        result={result}
-        runCode={runCode}
-        submitAnswer={submitAnswer}
-        submitted={submitted}
-      />
-    </div>
-  );
-}
-
-/* -------------------------------------------------------
-   LEVEL 3
-------------------------------------------------------- */
-
-function Level3({ onComplete }) {
-  const [code, setCode] = useState(
-`# Write your Level 3 solution here
-
-def solve():
-    pass
-
-solve()`
-  );
-
-  const [language, setLanguage] = useState("python");
-  const [result, setResult] = useState(null);
-  const [submitted, setSubmitted] = useState(false);
-
-  const runCode = () => {
-    setResult("running");
-
-    setTimeout(() => {
-      setResult("success");
-    }, 1200);
-  };
-
-  const submitAnswer = () => {
-    if (!result || result === "running") return;
-
-    setSubmitted(true);
-
-    setTimeout(() => {
-      onComplete();
-    }, 500);
-  };
-
-  return (
-    <div className="grid gap-6 lg:grid-cols-[420px_1fr]">
-      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6">
-        <span className="rounded-full bg-orange-400/10 px-3 py-1 text-xs font-semibold text-orange-400">
-          LEVEL 3
-        </span>
-
-        <h2 className="mt-6 text-2xl font-bold">
-          Array Processing
-        </h2>
-
-        <p className="mt-4 text-sm leading-7 text-gray-400">
-          Read an array of integers and calculate the sum
-          of all even numbers.
-        </p>
-
-        <div className="mt-6">
-          <h3 className="text-sm font-semibold">
-            Example
-          </h3>
-
-          <div className="mt-2 rounded-lg bg-black/40 p-4 font-mono text-sm">
-            <p className="text-gray-500">Input</p>
-            <p>5</p>
-            <p>1 2 3 4 6</p>
-
-            <p className="mt-3 text-gray-500">Output</p>
-            <p>12</p>
-          </div>
-        </div>
-      </div>
-
-      <CodeEditor
-        language={language}
-        setLanguage={setLanguage}
-        code={code}
-        setCode={setCode}
-        result={result}
-        runCode={runCode}
-        submitAnswer={submitAnswer}
-        submitted={submitted}
-      />
-    </div>
-  );
-}
-
-/* -------------------------------------------------------
-   CODE EDITOR
-------------------------------------------------------- */
-
-function CodeEditor({
-  language,
-  setLanguage,
-  code,
-  setCode,
-  result,
-  runCode,
-  submitAnswer,
-  submitted,
-}) {
-  return (
-    <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#0b0b0b]">
-      {/* Editor Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-white/[0.03] px-4 py-3">
-        <select
-          value={language}
-          onChange={(e) => setLanguage(e.target.value)}
-          className="rounded-lg border border-white/10 bg-black px-3 py-2 text-sm text-white outline-none"
-        >
-          <option value="c">C</option>
-          <option value="java">Java</option>
-          <option value="python">Python</option>
-        </select>
-
-        <span className="text-xs text-gray-500">
-          Your code is evaluated against test cases
-        </span>
-      </div>
-
-      {/* Editor */}
-      <div className="p-4">
-        <textarea
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          spellCheck={false}
-          className="min-h-[480px] w-full resize-none rounded-xl border border-white/10 bg-[#050505] p-5 font-mono text-sm leading-6 text-gray-200 outline-none focus:border-cyan-400"
-          onKeyDown={(e) => {
-            // Keep TAB inside the editor for indentation.
-            if (e.key === "Tab") {
-              e.preventDefault();
-
-              const start = e.target.selectionStart;
-              const end = e.target.selectionEnd;
-
-              const newValue =
-                code.substring(0, start) +
-                "    " +
-                code.substring(end);
-
-              setCode(newValue);
-
-              requestAnimationFrame(() => {
-                e.target.selectionStart = start + 4;
-                e.target.selectionEnd = start + 4;
-              });
-            }
-
-            // Prevent ESC
-            if (e.key === "Escape") {
-              e.preventDefault();
-            }
-          }}
-        />
-      </div>
-
-      {/* Result */}
-      <div className="border-t border-white/10 px-4 py-4">
-        {!result && (
-          <p className="text-sm text-gray-500">
-            Run your code to check the test cases.
-          </p>
-        )}
-
-        {result === "running" && (
-          <div className="flex items-center gap-3 text-sm text-yellow-400">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
-            Running test cases...
-          </div>
-        )}
-
-        {result === "success" && (
-          <div className="rounded-xl border border-green-400/20 bg-green-400/10 p-4">
-            <div className="flex items-center gap-2 font-semibold text-green-400">
-              <span>✓</span>
-              All test cases passed
-            </div>
-
-            <p className="mt-1 text-xs text-green-400/70">
-              Your code produced the expected output.
-            </p>
-          </div>
-        )}
-
-        {result === "failed" && (
-          <div className="rounded-xl border border-red-400/20 bg-red-400/10 p-4">
-            <div className="flex items-center gap-2 font-semibold text-red-400">
-              <span>✕</span>
-              Test cases failed
-            </div>
-
-            <p className="mt-1 text-xs text-red-400/70">
-              Your output did not match the expected output.
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* Actions */}
-      <div className="flex flex-col gap-3 border-t border-white/10 bg-white/[0.02] p-4 sm:flex-row sm:justify-end">
-        <button
-          onClick={runCode}
-          disabled={result === "running" || !code.trim()}
-          className="rounded-xl border border-white/10 px-6 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {result === "running"
-            ? "Running..."
-            : "▶ Run Code"}
-        </button>
-
-        <button
-          onClick={submitAnswer}
-          disabled={
-            !result ||
-            result === "running" ||
-            submitted
-          }
-          className="rounded-xl bg-cyan-400 px-6 py-3 text-sm font-bold text-black transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {submitted
-            ? "Submitted"
-            : "Submit Answer"}
-        </button>
-      </div>
     </div>
   );
 }

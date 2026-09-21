@@ -1,0 +1,119 @@
+/**
+ * Admin API client — all routes require a verified backend JWT.
+ * Scores / leaderboard are never exposed on student endpoints.
+ */
+
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
+const ADMIN_TOKEN_KEY = "adminToken";
+const ADMIN_USER_KEY = "adminUsername";
+
+export function getAdminToken() {
+  return localStorage.getItem(ADMIN_TOKEN_KEY);
+}
+
+export function getAdminUsername() {
+  return localStorage.getItem(ADMIN_USER_KEY);
+}
+
+export function clearAdminSession() {
+  localStorage.removeItem(ADMIN_TOKEN_KEY);
+  localStorage.removeItem(ADMIN_USER_KEY);
+}
+
+function setAdminSession(token, username) {
+  localStorage.setItem(ADMIN_TOKEN_KEY, token);
+  if (username) localStorage.setItem(ADMIN_USER_KEY, username);
+}
+
+async function adminApi(path, { method = "GET", body } = {}) {
+  const token = getAdminToken();
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw new Error("Unable to reach the admin API.");
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("Invalid response from the admin API.");
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      clearAdminSession();
+    }
+    const err = new Error(data.message || "Request failed");
+    err.status = response.status;
+    throw err;
+  }
+
+  return data;
+}
+
+export async function adminLogin(username, password) {
+  const data = await adminApi("/admin/login", {
+    method: "POST",
+    body: { username, password },
+  });
+  // login endpoint doesn't need prior token — adminApi still works without one
+  setAdminSession(data.token, data.username);
+  return data;
+}
+
+export async function verifyAdminSession() {
+  if (!getAdminToken()) return null;
+  try {
+    return await adminApi("/admin/me");
+  } catch {
+    clearAdminSession();
+    return null;
+  }
+}
+
+export async function fetchOverview() {
+  return adminApi("/admin/overview");
+}
+
+export async function fetchLeaderboard() {
+  const data = await adminApi("/admin/leaderboard");
+  return data.leaderboard || [];
+}
+
+export async function fetchStudentDetail(studentId) {
+  return adminApi(`/admin/students/${studentId}`);
+}
+
+export async function fetchEvaluationCriteria() {
+  return adminApi("/admin/evaluation-criteria");
+}
+
+/** Special-case login without requiring existing token */
+export async function loginRequest(username, password) {
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/admin/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+  } catch {
+    throw new Error("Unable to reach the admin API. Is the server running?");
+  }
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.message || "Invalid credentials.");
+  }
+  setAdminSession(data.token, data.username);
+  return data;
+}
