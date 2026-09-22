@@ -39,15 +39,18 @@ export function useExamTimer(endsAt) {
 
 /**
  * Request fullscreen for the exam container.
- * ESC always exits fullscreen (browser security) — we warn and re-request
- * on the next allowed user gesture. We still prevent ESC from doing
- * anything else inside the exam UI.
+ * ESC always exits fullscreen (browser security). When an ACTIVE exam
+ * unexpectedly leaves fullscreen, call onUnexpectedExit once (auto end-test).
+ * Initial enter failures still show a warning so the student can re-enter.
  */
-export function useExamFullscreen(enabled) {
+export function useExamFullscreen(enabled, onUnexpectedExit) {
   const containerRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showWarning, setShowWarning] = useState(false);
-  const intentionalExit = useRef(false);
+  const wasFullscreenRef = useRef(false);
+  const exitHandledRef = useRef(false);
+  const onExitRef = useRef(onUnexpectedExit);
+  onExitRef.current = onUnexpectedExit;
 
   const requestFs = useCallback(async () => {
     const el = containerRef.current;
@@ -69,13 +72,35 @@ export function useExamFullscreen(enabled) {
   }, [requestFs]);
 
   useEffect(() => {
-    if (!enabled) return undefined;
+    if (!enabled) {
+      wasFullscreenRef.current = false;
+      exitHandledRef.current = false;
+      return undefined;
+    }
+
+    let alive = true;
 
     const onChange = () => {
+      if (!alive) return;
+
       const active = Boolean(document.fullscreenElement);
       setIsFullscreen(active);
-      if (!active && !intentionalExit.current) {
-        setShowWarning(true);
+
+      if (active) {
+        wasFullscreenRef.current = true;
+        setShowWarning(false);
+        return;
+      }
+
+      // Only auto-end when an active exam that had entered fullscreen exits.
+      if (
+        wasFullscreenRef.current &&
+        !exitHandledRef.current &&
+        typeof onExitRef.current === "function"
+      ) {
+        exitHandledRef.current = true;
+        setShowWarning(false);
+        onExitRef.current();
       }
     };
 
@@ -85,6 +110,7 @@ export function useExamFullscreen(enabled) {
     requestFs();
 
     return () => {
+      alive = false;
       document.removeEventListener("fullscreenchange", onChange);
     };
   }, [enabled, requestFs]);

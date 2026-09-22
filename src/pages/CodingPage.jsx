@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import CodeEditor from "../components/CodeEditor";
@@ -47,14 +47,46 @@ export default function CodingPage() {
 
   const [submitting, setSubmitting] = useState(false);
   const [ending, setEnding] = useState(false);
+  const endExamLockRef = useRef(false);
 
   const { remainingMs, expired, formatTime } = useExamTimer(examMeta?.endsAt);
+
+  const finalizeExam = useCallback(async (reason) => {
+    if (endExamLockRef.current) return;
+    endExamLockRef.current = true;
+    setEnding(true);
+    try {
+      const result = await endExam();
+      setExamComplete(true);
+      setEndReason(reason);
+      if (result?.submissions) setSubmissions(result.submissions);
+      if (result?.unlockedLevel) setUnlockedLevel(result.unlockedLevel);
+    } catch (err) {
+      // Allow a single retry path only for explicit End Test confirm failures.
+      if (reason === "ended") {
+        endExamLockRef.current = false;
+        alert(err.message || "Failed to end exam.");
+      } else {
+        setExamComplete(true);
+        setEndReason(reason);
+      }
+    } finally {
+      setEnding(false);
+    }
+  }, []);
+
+  const handleFullscreenExit = useCallback(() => {
+    if (endExamLockRef.current || examComplete || ending || expired) return;
+    void finalizeExam("ended");
+  }, [examComplete, ending, expired, finalizeExam]);
+
   const {
     containerRef,
     showWarning,
     enterFullscreen,
   } = useExamFullscreen(
-    Boolean(participant && examMeta && !expired && !examComplete)
+    Boolean(participant && examMeta && !expired && !examComplete),
+    handleFullscreenExit
   );
 
   const questions = useMemo(
@@ -318,39 +350,19 @@ export default function CodingPage() {
   };
 
   const handleEndTest = async () => {
-    if (ending || examComplete) return;
+    if (ending || examComplete || endExamLockRef.current) return;
     const confirmed = window.confirm(
       "End the exam now? You will not be able to continue after this."
     );
     if (!confirmed) return;
-
-    setEnding(true);
-    try {
-      const result = await endExam();
-      setExamComplete(true);
-      setEndReason("ended");
-      if (result?.submissions) setSubmissions(result.submissions);
-      if (result?.unlockedLevel) setUnlockedLevel(result.unlockedLevel);
-    } catch (err) {
-      alert(err.message || "Failed to end exam.");
-    } finally {
-      setEnding(false);
-    }
+    await finalizeExam("ended");
   };
 
   // Auto-end when client timer expires (server also enforces)
   useEffect(() => {
-    if (!expired || examComplete || ending) return;
-    (async () => {
-      try {
-        await endExam();
-      } catch {
-        /* server may already have expired the exam */
-      }
-      setExamComplete(true);
-      setEndReason("timeout");
-    })();
-  }, [expired, examComplete, ending]);
+    if (!expired || examComplete || ending || endExamLockRef.current) return;
+    void finalizeExam("timeout");
+  }, [expired, examComplete, ending, finalizeExam]);
 
   if (bootError) {
     return (
