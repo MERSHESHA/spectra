@@ -60,6 +60,11 @@ export function useExamFullscreen(enabled, onUnexpectedExit) {
       if (!document.fullscreenElement) {
         await el.requestFullscreen?.();
       }
+      if (document.fullscreenElement) {
+        wasFullscreenRef.current = true;
+        setIsFullscreen(true);
+        setShowWarning(false);
+      }
     } catch {
       // Browser may block without a user gesture — show warning instead.
       setShowWarning(true);
@@ -79,6 +84,13 @@ export function useExamFullscreen(enabled, onUnexpectedExit) {
     }
 
     let alive = true;
+
+    // Already fullscreen from registration click gesture (documentElement).
+    if (document.fullscreenElement) {
+      wasFullscreenRef.current = true;
+      setIsFullscreen(true);
+      setShowWarning(false);
+    }
 
     const onChange = () => {
       if (!alive) return;
@@ -106,8 +118,10 @@ export function useExamFullscreen(enabled, onUnexpectedExit) {
 
     document.addEventListener("fullscreenchange", onChange);
 
-    // Initial attempt (may fail without gesture — that's OK)
-    requestFs();
+    // Retry if registration fullscreen did not stick; may still need gesture.
+    if (!document.fullscreenElement) {
+      requestFs();
+    }
 
     return () => {
       alive = false;
@@ -115,7 +129,7 @@ export function useExamFullscreen(enabled, onUnexpectedExit) {
     };
   }, [enabled, requestFs]);
 
-  // Block Escape from bubbling / exiting exam flows (cannot stop FS exit)
+  // Soften disruptive shortcuts during exam (ESC cannot block FS exit).
   useEffect(() => {
     if (!enabled) return undefined;
 
@@ -125,7 +139,6 @@ export function useExamFullscreen(enabled, onUnexpectedExit) {
         e.stopPropagation();
       }
 
-      // Soften common disruptive shortcuts during exam
       if (e.key === "F5" || (e.ctrlKey && e.key.toLowerCase() === "r")) {
         e.preventDefault();
       }
@@ -145,4 +158,49 @@ export function useExamFullscreen(enabled, onUnexpectedExit) {
     enterFullscreen,
     dismissWarning: () => setShowWarning(false),
   };
+}
+
+/**
+ * Detect leaving the exam tab/window via Page Visibility API.
+ * visibilitychange is primary; blur only when the page is already hidden
+ * (avoids false positives from normal in-page focus changes).
+ */
+export function useExamTabGuard(enabled, onLeave) {
+  const onLeaveRef = useRef(onLeave);
+  onLeaveRef.current = onLeave;
+  const firedRef = useRef(false);
+
+  useEffect(() => {
+    if (!enabled) {
+      firedRef.current = false;
+      return undefined;
+    }
+
+    let alive = true;
+
+    const trigger = () => {
+      if (!alive || firedRef.current) return;
+      if (typeof onLeaveRef.current !== "function") return;
+      firedRef.current = true;
+      onLeaveRef.current();
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") trigger();
+    };
+
+    const onBlur = () => {
+      // Supplementary only — ignore blur while the document is still visible.
+      if (document.visibilityState === "hidden") trigger();
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onBlur);
+
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [enabled]);
 }

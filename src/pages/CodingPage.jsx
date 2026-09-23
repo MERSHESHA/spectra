@@ -5,7 +5,11 @@ import CodeEditor from "../components/CodeEditor";
 import QuestionPanel from "../components/QuestionPanel";
 import TestResults from "../components/TestResults";
 import { LEVEL_IDS, levels as staticLevels } from "../data/questions";
-import { useExamFullscreen, useExamTimer } from "../hooks/useExam";
+import {
+  useExamFullscreen,
+  useExamTabGuard,
+  useExamTimer,
+} from "../hooks/useExam";
 import { runCodeAgainstTestCases } from "../services/codeExecutionService";
 import {
   getStoredParticipant,
@@ -47,6 +51,9 @@ export default function CodingPage() {
 
   const [submitting, setSubmitting] = useState(false);
   const [ending, setEnding] = useState(false);
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
+  const [endConfirmError, setEndConfirmError] = useState("");
+  const [showFsHint, setShowFsHint] = useState(true);
   const endExamLockRef = useRef(false);
 
   const { remainingMs, expired, formatTime } = useExamTimer(examMeta?.endsAt);
@@ -55,6 +62,7 @@ export default function CodingPage() {
     if (endExamLockRef.current) return;
     endExamLockRef.current = true;
     setEnding(true);
+    setShowEndConfirm(false);
     try {
       const result = await endExam();
       setExamComplete(true);
@@ -62,10 +70,10 @@ export default function CodingPage() {
       if (result?.submissions) setSubmissions(result.submissions);
       if (result?.unlockedLevel) setUnlockedLevel(result.unlockedLevel);
     } catch (err) {
-      // Allow a single retry path only for explicit End Test confirm failures.
       if (reason === "ended") {
         endExamLockRef.current = false;
-        alert(err.message || "Failed to end exam.");
+        setEndConfirmError(err.message || "Failed to end exam.");
+        setShowEndConfirm(true);
       } else {
         setExamComplete(true);
         setEndReason(reason);
@@ -75,19 +83,23 @@ export default function CodingPage() {
     }
   }, []);
 
-  const handleFullscreenExit = useCallback(() => {
+  const handleExamViolation = useCallback(() => {
     if (endExamLockRef.current || examComplete || ending || expired) return;
-    void finalizeExam("ended");
+    void finalizeExam("violation");
   }, [examComplete, ending, expired, finalizeExam]);
+
+  const examActive = Boolean(
+    participant && examMeta && !expired && !examComplete
+  );
 
   const {
     containerRef,
+    isFullscreen,
     showWarning,
     enterFullscreen,
-  } = useExamFullscreen(
-    Boolean(participant && examMeta && !expired && !examComplete),
-    handleFullscreenExit
-  );
+  } = useExamFullscreen(examActive, handleExamViolation);
+
+  useExamTabGuard(examActive, handleExamViolation);
 
   const questions = useMemo(
     () => levelsData[activeLevel] || [],
@@ -349,13 +361,15 @@ export default function CodingPage() {
     }
   };
 
-  const handleEndTest = async () => {
+  const handleEndTest = () => {
     if (ending || examComplete || endExamLockRef.current) return;
-    const confirmed = window.confirm(
-      "End the exam now? You will not be able to continue after this."
-    );
-    if (!confirmed) return;
-    await finalizeExam("ended");
+    setEndConfirmError("");
+    setShowEndConfirm(true);
+  };
+
+  const handleConfirmEndTest = () => {
+    if (ending || examComplete || endExamLockRef.current) return;
+    void finalizeExam("ended");
   };
 
   // Auto-end when client timer expires (server also enforces)
@@ -363,6 +377,10 @@ export default function CodingPage() {
     if (!expired || examComplete || ending || endExamLockRef.current) return;
     void finalizeExam("timeout");
   }, [expired, examComplete, ending, finalizeExam]);
+
+  useEffect(() => {
+    if (isFullscreen) setShowFsHint(false);
+  }, [isFullscreen]);
 
   if (bootError) {
     return (
@@ -394,22 +412,60 @@ export default function CodingPage() {
       ref={containerRef}
       className="h-screen overflow-x-hidden overflow-y-auto bg-[#050505] text-white"
     >
-      {/* Fullscreen warning */}
+      {/* Fullscreen required (blocked / not active) */}
       {showWarning && !examEnded && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 px-5">
           <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#111] p-6 text-center shadow-2xl">
-            <h2 className="text-xl font-bold">Fullscreen required</h2>
+            <h2 className="text-xl font-bold">Fullscreen Required</h2>
             <p className="mt-3 text-sm leading-6 text-gray-400">
-              The exam should remain in fullscreen mode. Your browser may exit
-              fullscreen when Escape is pressed — click below to return.
+              Do not exit fullscreen or switch tabs during the exam. Leaving
+              fullscreen or switching tabs will disqualify and automatically
+              submit your exam.
             </p>
             <button
               type="button"
               onClick={enterFullscreen}
               className="mt-6 w-full rounded-xl bg-cyan-400 px-5 py-3 font-bold text-black transition hover:bg-cyan-300"
             >
-              Return to Fullscreen
+              Enter Fullscreen
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* End Test confirmation (in-app, not browser confirm) */}
+      {showEndConfirm && !examEnded && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 px-5">
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#111] p-6 text-center shadow-2xl">
+            <h2 className="text-xl font-bold">End Test?</h2>
+            <p className="mt-3 text-sm leading-6 text-gray-400">
+              Are you sure you want to end the test? Your current answers and
+              score will be submitted, and you will not be able to continue.
+            </p>
+            {endConfirmError ? (
+              <p className="mt-3 text-sm text-red-400">{endConfirmError}</p>
+            ) : null}
+            <div className="mt-6 flex gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowEndConfirm(false);
+                  setEndConfirmError("");
+                }}
+                disabled={ending}
+                className="flex-1 rounded-xl border border-white/15 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmEndTest}
+                disabled={ending}
+                className="flex-1 rounded-xl bg-red-500 px-5 py-3 text-sm font-bold text-white transition hover:bg-red-400 disabled:opacity-50"
+              >
+                {ending ? "Ending…" : "End Test"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -419,19 +475,37 @@ export default function CodingPage() {
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/85 px-5">
           <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#111] p-8 text-center shadow-2xl">
             <h2 className="text-2xl font-bold">
-              {endReason === "timeout" || (expired && endReason !== "ended")
-                ? "Time's Up"
-                : "Exam Completed"}
+              {endReason === "violation"
+                ? "Exam Disqualified"
+                : endReason === "timeout" ||
+                    (expired && endReason !== "ended" && endReason !== "violation")
+                  ? "Time's Up"
+                  : "Exam Completed"}
             </h2>
             <p className="mt-3 text-sm leading-6 text-gray-400">
-              {endReason === "timeout" || (expired && endReason !== "ended")
-                ? "The 60-minute exam has ended. Submissions are no longer accepted."
-                : "Your exam has ended. Further submissions are not accepted."}
+              {endReason === "violation"
+                ? "You left the exam window. Switching tabs or leaving the exam during the test is not allowed. Your exam will be submitted with your current score."
+                : endReason === "timeout" ||
+                    (expired && endReason !== "ended" && endReason !== "violation")
+                  ? "The 60-minute exam has ended. Submissions are no longer accepted."
+                  : "Your exam has ended. Further submissions are not accepted."}
             </p>
             <p className="mt-4 text-xs text-gray-600">
               {participant.name} · {participant.registerNumber}
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Compact fullscreen/tab rules hint (shown once until fullscreen) */}
+      {!examEnded && showFsHint && !showWarning && (
+        <div className="border-b border-amber-400/20 bg-amber-400/10 px-5 py-2 text-center text-xs text-amber-200/90">
+          <strong className="font-semibold text-amber-100">
+            Fullscreen Required.
+          </strong>{" "}
+          Do not exit fullscreen or switch tabs during the exam. Leaving
+          fullscreen or switching tabs will disqualify and automatically submit
+          your exam.
         </div>
       )}
 

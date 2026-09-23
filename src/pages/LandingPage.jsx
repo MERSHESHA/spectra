@@ -97,6 +97,16 @@ export default function LandingPage() {
 
     setStarting(true);
     try {
+      // Fullscreen must be requested in the same user-gesture chain as this click.
+      // Do not delay with setTimeout — browsers will block it.
+      try {
+        if (!document.fullscreenElement) {
+          await document.documentElement.requestFullscreen?.();
+        }
+      } catch {
+        // Coding page will show an in-app fullscreen-required warning.
+      }
+
       sessionStorage.setItem("codingParticipant", JSON.stringify(participant));
       clearExamSession();
       sessionStorage.removeItem("examSession");
@@ -104,6 +114,13 @@ export default function LandingPage() {
       await startExam(participant);
       navigate("/coding");
     } catch (err) {
+      if (document.fullscreenElement) {
+        try {
+          await document.exitFullscreen?.();
+        } catch {
+          /* ignore */
+        }
+      }
       setSubmitError(
         err.message || "Unable to connect to server. Please try again."
       );
