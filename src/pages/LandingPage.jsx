@@ -11,6 +11,11 @@ const departments = [
   "CIVIL",
   "AIDS",
   "AIML",
+  "AGRI",
+  "BIOMEDICAL",
+  "MCA",
+  "MBA",
+  "OTHERS"
 ];
 
 const years = ["1", "2", "3", "4"];
